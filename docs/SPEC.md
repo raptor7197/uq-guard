@@ -104,6 +104,13 @@ Sized for a side project (~6–10 h/wk). Each phase ends with a runnable exit te
 **Exit test:** run demo → `runs/<id>.jsonl` has one line per step, each with 5 parsed candidate tool calls. `pytest tests/test_capture.py` asserts schema round-trip.
 **Gotchas:** tool-call parsing across k samples must tolerate a sample that answers in text instead of calling a tool (that itself is signal — record it as `tool_name="__none__"`); cap k-sampling to the model-node only, never the tool node (cost).
 
+> **Validated failure taxonomy (Phase 1 runs, 10 tasks x k=5, qwen3:4b + gemini-flash-lite):**
+> 1. **Underspecification splits** (task 8; task 9 on qwen): candidates disagree within a step -- split bookings (4xF7/1xF6), fabricated dates, three different invented origins. -> caught by Phase 2 arg-agreement.
+> 2. **Tie-breaks** (tasks 6, 7, 10): equally-valid options, model picks positionally, **unanimous across samples** -- invisible to consistency scoring (the arXiv 2605.19220 blindspot, observed live). -> needs Phase 3 options-set signal from tool results (KnowNo-style).
+> 3. **Doom-loops** (task 9 on flash-lite): perfect within-step agreement while churning invented args across steps against repeated empty tool results. -> needs Phase 3 tool-result/churn signal; maps to Agentic Abstention's stop-decision.
+>
+> Consequence: Phase 2's gate demos on class 1 only; classes 2-3 stay wrong-but-confident until Phase 3. Say so in the README from day one.
+
 ### Phase 2 — First scorer + working gate ← the "it works" moment (1–2 weekends)
 **Build:**
 - `scorers/agreement.py`: normalized exact-match agreement over `(tool_name, args)` across candidates; score = fraction agreeing with majority. Field-level, so "same tool, different date" scores low. Stdlib only.
@@ -112,15 +119,17 @@ Sized for a side project (~6–10 h/wk). Each phase ends with a runnable exit te
 **Exit test:** demo task "book the 9am flight" → proceeds untouched. Task "book me the cheap one" (two matches) → pauses, prints candidates + agreement score, human approves, resumes. This is the 30-second demo GIF.
 **Do NOT:** add more scorers, fusion, or conformal yet. One signal, one threshold, working interrupt = the skeleton everything bolts onto.
 
-### Phase 3 — Full scorer suite (2 weekends)
-**Build:**
-- `scorers/base.py`: `Scorer` protocol (`score(step: AgentStep) -> float`) + registry; user-custom scorers via `@register_scorer`.
-- `entropy.py`: semantic entropy over candidate raw_texts — NLI-cluster then entropy (or delegate to UQLM's consistency scorers; pick one, benchmark later).
-- `conflict.py`: post-execution NLI between agent's stated expectation and tool result (contradiction prob = conflict). Note: this scorer fires *after* execution — it gates the *next* step and feeds RETRY, it can't block the call it scores.
-- `support.py`: max cosine sim between chosen action's args/claim and retrieval context chunks; low sim = unsupported.
-- Lazy-load models once per process; cache NLI pairs.
-**Exit test:** trace lines now carry all 4 signals; on the 10 seeded tasks, ambiguous ones separably score worse on ≥1 signal (assert in test).
-**Gotcha:** k=5 NLI clustering is O(k²) pairs = 10 NLI calls per step — fine on CPU; don't prematurely optimize.
+### Phase 3 — Scorer suite (2 weekends) — REVISED after Phase 1 taxonomy
+Built the scorers the observed failure classes demand, both cloud-only (no torch/NLI downloads;
+user runs no local models):
+- `scorers/base.py`: registry + `@register_scorer`; scorer = callable `(step, history) -> float in [0,1]`. (Done in Phase 2.)
+- `scorers/conflict.py` (`tool_churn`): doom-loop detector (class 3). Same tool re-called with different args after fruitless results -> confidence decays 1/(1+n). Pure logic on step history, zero deps. `ponytail:` naive fruitless-markers, NLI upgrade path noted.
+- `scorers/options.py` (`OptionsSetScorer`): tie-break detector (class 2), KnowNo-flavored. One judge call: "does the request uniquely determine this choice among the prior tool results?" NO -> 0.0. Costs one model call per scored step; opt-in (`--judge`).
+- Capture now retains per-thread `history` (flushed steps) and stashes the user request in `step.retrieval_context` — the grounding context scorers judge against.
+**Deferred with reasons (not dropped):**
+- `entropy.py` semantic entropy over raw_texts: tool-call responses have empty text in practice (observed); action-level entropy ≈ arg_agreement. Revisit for final-answer gating / RAG demo.
+- `support.py` embedding-based retrieval support: no retrieval corpus in the demo to test against; sentence-transformers is a heavy dep. Add with a RAG example in v2.
+**Exit test:** unit: churn decay + judge verdict paths. Live: task 9 doom-loop escalates via churn and human reject converts it to clean abstention; task 6 unanimous tie-break escalates via judge; task 1 with judge stays uninterrupted.
 
 ### Phase 4 — Fusion + conformal calibration (2 weekends)
 **Build:**
