@@ -272,6 +272,9 @@ def main():
                     help="escalate when confidence < threshold (default 1.0: any disagreement)")
     ap.add_argument("--judge", action="store_true",
                     help="add the options_set judge scorer (one extra model call per gated step)")
+    ap.add_argument("--tool-threshold", action="append", default=[], metavar="TOOL:FLOAT",
+                    help="per-tool gate threshold, e.g. --tool-threshold refund:1.0 "
+                         "(repeatable; overrides --gate-threshold for that tool)")
     ap.add_argument("-q", "--quiet", action="store_true", help="suppress step-level logs")
     args = ap.parse_args()
     if args.gate and args.k < 2:
@@ -302,7 +305,20 @@ def main():
             # judge only the destructive tools; read-only searches don't need it
             scorers.append(OptionsSetScorer(resolve_model(args.model),
                                             tools=("book_flight", "refund")))
-        policy = ThresholdPolicy(args.gate_threshold, tuple(scorers))
+        from uqguard import ToolConfig
+
+        tool_config = {}
+        for spec in args.tool_threshold:
+            tool_name, _, value = spec.partition(":")
+            try:
+                threshold = float(value)
+            except ValueError:
+                threshold = None
+            if not tool_name or threshold is None:
+                ap.error(f"--tool-threshold expects TOOL:FLOAT, got {spec!r}")
+            tool_config[tool_name] = ToolConfig(threshold=threshold)
+        policy = ThresholdPolicy(args.gate_threshold, tuple(scorers),
+                                 tool_config=tool_config)
         middleware.append(GateMiddleware(capture, policy))
         checkpointer = InMemorySaver()  # interrupt/resume needs one
 
