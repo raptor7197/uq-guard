@@ -4,8 +4,12 @@ from uqguard.fallback import ModelFallbackMiddleware
 from uqguard.fusion import LogisticFusion, WeightedSum
 from uqguard.gate import GateMiddleware
 from uqguard.guard import Guard
-from uqguard.policy import RoutedPolicy, ThresholdPolicy
-from uqguard.scorers import OptionsSetScorer
+from uqguard.policy import RoutedPolicy, ThresholdPolicy, ToolConfig
+from uqguard.scorers import (
+    OptionsSetScorer,
+    RetrievalSupport,
+    SemanticEntropy,
+)
 from uqguard.step import AgentStep, CandidateAction, Gate
 from uqguard.trace import TraceWriter, read_trace
 
@@ -19,8 +23,11 @@ __all__ = [
     "LogisticFusion",
     "ModelFallbackMiddleware",
     "OptionsSetScorer",
+    "RetrievalSupport",
     "RoutedPolicy",
+    "SemanticEntropy",
     "ThresholdPolicy",
+    "ToolConfig",
     "TraceWriter",
     "WeightedSum",
     "accepted_error",
