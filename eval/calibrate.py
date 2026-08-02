@@ -10,6 +10,12 @@ Every reported number comes from this script. Honesty rule: no invented
 percentages; sample sizes are printed next to every metric.
 
 Run: uv run python eval/calibrate.py --tasks 30 --k 3 [--judge] [--model ...]
+
+Per-step-type mitigation: agent steps within a trajectory are not
+exchangeable, and tools differ in how confidence maps to correctness, so a
+single threshold mis-calibrates at least one tool. Pass --per-tool to compute
+and apply a conformal threshold per tool (step-type) and report per-tool
+accepted-error/coverage alongside the global numbers.
 """
 
 import argparse
@@ -27,7 +33,6 @@ from uqguard import (  # noqa: E402
     CaptureMiddleware,
     LogisticFusion,
     WeightedSum,
-    accepted_error,
     conformal_threshold,
     ece,
     risk_coverage,
@@ -204,7 +209,21 @@ def bootstrap_ci(test, stat, n_boot=1000, seed=7):
     return [round(lo, 3), round(hi, 3)]
 
 
-def evaluate(rows, alpha, seed=7):
+def per_tool_thresholds(cal, alpha):
+    """{tool: conformal_threshold} computed per step-type on the calibration
+    split. The exchangeability mitigation: each tool's threshold is set from
+    its own wrong steps, so a tool whose confidence is systematically
+    over/under-expressed doesn't inherit another tool's miscalibration."""
+    out = {}
+    for tool in sorted({r["tool"] for r in cal}):
+        subset = [r for r in cal if r["tool"] == tool]
+        out[tool] = conformal_threshold(
+            [r["_conf"] for r in subset], [r["correct"] for r in subset], alpha=alpha
+        )
+    return out
+
+
+def evaluate(rows, alpha, seed=7, per_tool=False):
     from sklearn.metrics import roc_auc_score
 
     rng = random.Random(seed)
@@ -227,22 +246,37 @@ def evaluate(rows, alpha, seed=7):
     conf_cal, conf_test = apply(fusion, cal), apply(fusion, test)
     y_cal = [r["correct"] for r in cal]
     y_test = [r["correct"] for r in test]
-    thr = conformal_threshold(conf_cal, y_cal, alpha=alpha)
-    err, n_acc = accepted_error(conf_test, y_test, thr)
+    for r, c in zip(cal, conf_cal, strict=True):
+        r["_conf"] = c
     for r, c in zip(test, conf_test, strict=True):
-        r["_conf"] = c  # for bootstrap stats
+        r["_conf"] = c
+
+    thr = conformal_threshold(conf_cal, y_cal, alpha=alpha)
+    tool_thrs = per_tool_thresholds(cal, alpha) if per_tool else {}
+
+    def thr_for(r):
+        # per-tool thresholds; unseen tools fall back to the global one
+        return tool_thrs.get(r["tool"], thr)
+
+    def accepted(rs):
+        return [r for r in rs if r["_conf"] >= thr_for(r)]
+
+    acc = accepted(test)
+    err = sum(1 for r in acc if not r["correct"]) / len(acc) if acc else 0.0
 
     def safe_auroc(scores, labels):
         return (round(roc_auc_score(labels, scores), 3)
                 if len(set(labels)) > 1 else None)
 
     def stat_accepted_error(rs):
-        acc = [r for r in rs if r["_conf"] >= thr]
+        acc = accepted(rs)
         return sum(1 for r in acc if not r["correct"]) / len(acc) if acc else None
 
     def stat_wrong_accept(rs):
         wrong = [r for r in rs if not r["correct"]]
-        return (sum(1 for r in wrong if r["_conf"] >= thr) / len(wrong)) if wrong else None
+        if not wrong:
+            return None
+        return sum(1 for r in wrong if r["_conf"] >= thr_for(r)) / len(wrong)
 
     def stat_auroc(rs):
         labels = [r["correct"] for r in rs]
@@ -250,20 +284,38 @@ def evaluate(rows, alpha, seed=7):
             return None
         return roc_auc_score(labels, [r["_conf"] for r in rs])
 
+    per_tool_report = {}
+    for tool, t in tool_thrs.items():
+        subset = [r for r in test if r["tool"] == tool]
+        acc_t = accepted(subset)
+        per_tool_report[tool] = {
+            "threshold": round(t, 4),
+            "n_cal": sum(1 for r in cal if r["tool"] == tool),
+            "n_test": len(subset),
+            "accepted_error_test": (
+                round(sum(1 for r in acc_t if not r["correct"]) / len(acc_t), 3)
+                if acc_t else None
+            ),
+            "n_accepted_test": len(acc_t),
+            "coverage_test": round(len(acc_t) / len(subset), 3) if subset else None,
+        }
+
     results = {
         "n_tasks": len(task_ids), "n_steps": len(rows),
         "n_fit": len(fit), "n_cal": len(cal), "n_test": len(test),
         "base_wrong_rate_test": round(1 - sum(y_test) / len(y_test), 3) if test else None,
         "alpha": alpha, "threshold": round(thr, 4),
-        "accepted_error_test": round(err, 3), "n_accepted_test": n_acc,
+        "thresholds_per_tool": {t: round(v, 4) for t, v in tool_thrs.items()},
+        "accepted_error_test": round(err, 3), "n_accepted_test": len(acc),
         "accepted_error_ci95": bootstrap_ci(test, stat_accepted_error, seed=seed),
         # the quantity the conformal threshold actually bounds: P(accept | wrong)
         "wrong_accept_rate_test": round(
-            sum(1 for c, ok in zip(conf_test, y_test, strict=True) if not ok and c >= thr)
-            / max(1, sum(1 for ok in y_test if not ok)), 3),
+            sum(1 for r in test if not r["correct"] and r["_conf"] >= thr_for(r))
+            / max(1, sum(1 for r in test if not r["correct"])), 3),
         "wrong_accept_rate_ci95": bootstrap_ci(test, stat_wrong_accept, seed=seed),
-        "coverage_test": round(n_acc / len(test), 3) if test else None,
+        "coverage_test": round(len(acc) / len(test), 3) if test else None,
         "ece_fused_test": round(ece(conf_test, y_test), 3) if test else None,
+        "per_tool": per_tool_report,
         "auroc": {
             "fused": safe_auroc(conf_test, y_test),
             "fused_ci95": bootstrap_ci(test, stat_auroc, seed=seed),
@@ -324,6 +376,9 @@ def main():
     ap.add_argument("--judge", action="store_true",
                     help="score options_set on booking steps (one model call each)")
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--per-tool", action="store_true",
+                    help="conformal thresholds per step-type/tool (exchangeability "
+                         "mitigation) applied to the test split")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s",
@@ -336,7 +391,8 @@ def main():
     rows = run_capture(tasks, args.model, args.k, judge=judge)
     (OUT / "steps.json").write_text(json.dumps(rows, indent=1, default=str))
 
-    results, (conf, labels) = evaluate(rows, args.alpha, seed=args.seed)
+    results, (conf, labels) = evaluate(rows, args.alpha, seed=args.seed,
+                                       per_tool=args.per_tool)
     plots(conf, labels)
     (OUT / "results.json").write_text(json.dumps(results, indent=1))
     print(json.dumps(results, indent=1))

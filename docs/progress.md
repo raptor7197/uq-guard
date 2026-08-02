@@ -80,7 +80,12 @@ full codebase audit 2026-07-10: see audit.md, 18 findings, all tracked as github
 - pypi publish: build artifacts ready in dist/, publish is a user action (needs pypi account/token)
 - judge-inclusive calibration rerun: flash-lite daily quota (500/day) was exhausted 2026-07-10; rerun `eval/calibrate.py --tasks 30 --k 3 --judge` after reset, saved traces reload for free and only judge calls cost quota
 - tau2-bench via agentuq harness and when2call: need real api budget, hundreds of calls minimum, not feasible on free tier
-- per-step-type conformal calibration (the exchangeability mitigation the data demands)
-- per-tool risk config, parallel-tool-call gates, semantic entropy + retrieval support scorers (with a rag example)
 - demo video
 - rotate the gemini api key, it appeared in a chat transcript
+
+## round 2 (2026-08-01): knocked off three tracked items
+
+- **per-tool risk config**: `uqguard/policy.py` gains `ToolConfig` (scorers / threshold / routes per tool); `ThresholdPolicy` and `RoutedPolicy` take `tool_config`, `Guard(tool_config=)` threads it through. this is the mechanism audit findings #7/#17 asked for (judge only on destructive tools, stricter thresholds where blast radius is larger). demo exposes it as `--tool-threshold TOOL:FLOAT` (repeatable).
+- **per-step-type conformal calibration**: `eval/calibrate.py` gains `--per-tool` — conformal threshold computed per tool on the calibration split (unseen tools fall back to the global threshold), applied on test, and reported in `results.json["per_tool"]` per tool (threshold, n_cal, n_test, accepted error, coverage) plus `thresholds_per_tool`. this is the exchangeability mitigation the phase-5 data demanded.
+- **semantic_entropy + retrieval_support scorers** (deferred since phase 3, now with the rag example): `scorers/entropy.py` — entropy over equivalence-clustered k sampled raw texts, neutral on text-free tool-call steps, pluggable `equivalence` (nli upgrade path); `scorers/support.py` — lexical grounding of claim tokens (arg values or answer text) against request + tool results, pluggable `embed=` (sentence-transformers upgrade path), fail-closed on no evidence. `examples/demo_rag.py` exercises both on a policy-doc store incl. a question that is not in the corpus (both signals collapse together).
+- validation: 24 new/updated tests (90 total, all offline), ruff clean, imports verified. the judge-inclusive calibration rerun still needs the user's api key/quota; `--per-tool` and the two new scorers are exercised by unit tests until then.

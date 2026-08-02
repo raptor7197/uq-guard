@@ -28,7 +28,27 @@ Works with `invoke` and `ainvoke`/`astream` (async samples the k candidates conc
 |---|---|---|
 | `arg_agreement` | underspecification splits: candidates disagree on tool or args (fabricated dates, invented origins) | free |
 | `tool_churn` | doom loops: same tool re-called with mutating args after fruitless results | free |
+| `semantic_entropy` | text-answer dispersion (RAG / final answers): the k sampled raw texts say different things | free |
+| `retrieval_support` | ungrounded actions: claim tokens (args or answer text) absent from the request + tool results | free (lexical; optional `embed=` upgrade) |
 | `OptionsSetScorer` | tie-breaks: unanimous but *arbitrary* pick among equally-valid options (KnowNo-style) | 1 judge call |
+
+Scorers can be scoped **per tool**, which is how you make destructive tools stricter without re-specifying the whole policy — the mechanism the audit asked for to keep judge costs off read-only calls:
+
+```python
+from uqguard import Guard, ToolConfig
+
+guard = Guard(
+    k=5,
+    scorers=["arg_agreement", "tool_churn"],
+    tool_config={
+        "book_flight": ToolConfig(threshold=1.0),      # any doubt escalates
+        "refund": ToolConfig(threshold=1.0,
+                              scorers=("arg_agreement", "tool_churn", "options_set")),
+    },
+)
+```
+
+Each `ToolConfig` field (`scorers`, `threshold`, `routes`) falls back to the policy default when unset.
 
 3. **Gate** (`GateMiddleware` + `RoutedPolicy`): fused confidence below the threshold routes by the *weakest signal*, because each signal names its own intervention: request ambiguous → **CLARIFY** the user; agent flailing → **ESCALATE** to a reviewer; model unsure → **RETRY** with feedback (bounded). The CLARIFY route needs `OptionsSetScorer` in the scorer list (it requires a judge model, so the default free scorers can only RETRY/ESCALATE).
 4. **Calibrate** (`uqguard.conformal`): split-conformal threshold on a labeled calibration run. Stated precisely: under exchangeability, at most an α fraction of *wrong* steps are accepted; the empirical wrong-rate-among-accepted is reported alongside, never assumed. Agent steps are not i.i.d. — see limitations.
@@ -49,11 +69,15 @@ The tie-break class is the "confident hallucination" blindspot described in [arX
 uv sync
 export GOOGLE_API_KEY=...            # or OPENROUTER_API_KEY / OPENAI_API_KEY / OLLAMA_API_KEY
 uv run python examples/demo_agent.py --k 5 --gate --judge          # 10 seeded tasks
-uv run python eval/calibrate.py --tasks 30 --k 3                   # calibration + diagnostics
+uv run python examples/demo_agent.py --k 5 --gate --tool-threshold refund:1.0  # per-tool strictness
+uv run python examples/demo_rag.py --k 3                           # semantic_entropy + retrieval_support
+uv run python eval/calibrate.py --tasks 30 --k 3 --per-tool        # per-step-type conformal calibration
 uv run streamlit run ui/audit.py                                   # audit trail UI
 ```
 
 The demo travel agent is instructed to never ask questions — half its tasks are deliberately ambiguous, so it books wrong things silently. With the gate on: clear tasks pass untouched; ambiguous ones pause with evidence.
+
+The RAG demo (`examples/demo_rag.py`) is where the two text-era scorers live: it answers questions from a small policy-document store, and one task is deliberately *not in the docs* — the fabricated answer collapses `semantic_entropy` and `retrieval_support` together, which the travel demo's tool-call steps can't show.
 
 ## Results
 
@@ -69,6 +93,7 @@ All numbers below come from `eval/calibrate.py` (generated tasks, programmatic g
 | AUROC — tool_churn alone | 0.846 |
 | wrong-action rate among accepted @ α=0.1 threshold | 0.233 (coverage 0.612) |
 | P(accept \| wrong) — the bounded quantity | 0.269 (target ≤ 0.10) |
+| per-tool thresholds (`--per-tool`) | computed per step-type on the calibration split; per-tool accepted-error/coverage reported in `results.json["per_tool"]` |
 
 Findings, including the negative one: fusion beats each single signal on AUROC (with only two free signals, logistic fusion ties a plain average — expected). Accepting only above the conformal threshold cuts the wrong-action rate among executed actions from 53% to 23% at 61% coverage. **The conformal bound itself did not transfer**: P(accept | wrong) was 0.269 on test against a 0.10 target — the exchangeability violation we documented up front (steps are correlated within tasks; n is small), not a surprise. Per-step-type calibration and larger calibration sets are the v2 mitigation. The `options_set` judge is excluded from this calibration run (free-tier daily quota); it is validated qualitatively in the live gate runs documented in [docs/progress.md](docs/progress.md).
 
@@ -99,4 +124,4 @@ Traces persist the raw user request, tool args, and tool results to `runs/*.json
 uv sync && uv run pytest && uv run ruff check .
 ```
 
-Layout: `uqguard/` (capture, scorers, policy, gate, fusion, conformal, guard facade, plus a sticky provider-fallback middleware) · `examples/` (demo agent) · `eval/` (calibration) · `ui/` (audit) · `docs/` (prd, spec, progress log).
+Layout: `uqguard/` (capture, scorers, policy, gate, fusion, conformal, guard facade, plus a sticky provider-fallback middleware) · `examples/` (demo agent + RAG demo) · `eval/` (calibration) · `ui/` (audit) · `docs/` (prd, spec, progress log).
