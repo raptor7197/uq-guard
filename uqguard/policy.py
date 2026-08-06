@@ -35,8 +35,12 @@ def _score(step: AgentStep, history, scorers) -> None:
         try:
             step.signals[name] = fn(step, history)
         except Exception:
-            log.warning("scorer %r failed on %s; treating signal as missing",
-                        name, step.step_id, exc_info=True)
+            log.warning(
+                "scorer %r failed on %s; treating signal as missing",
+                name,
+                step.step_id,
+                exc_info=True,
+            )
 
 
 @dataclass
@@ -63,9 +67,19 @@ class ToolConfig:
 def _cfg(tool_config, tool_name) -> ToolConfig:
     """Per-tool override for a step's tool; unset fields are None and the
     caller falls back to policy defaults. Only None means 'fall back': an
-    explicitly empty tuple/dict is honored as-is."""
+    explicitly empty tuple/dict is honored as-is. Accepts either a ToolConfig
+    instance or a plain dict (coerced via ToolConfig(**cfg)); anything else
+    fails fast at decision time instead of deep in attribute access."""
     cfg = tool_config.get(tool_name)
-    return cfg if cfg is not None else ToolConfig()
+    if cfg is None:
+        return ToolConfig()
+    if isinstance(cfg, ToolConfig):
+        return cfg
+    if isinstance(cfg, dict):
+        return ToolConfig(**cfg)
+    raise TypeError(
+        f"tool_config[{tool_name!r}] must be a ToolConfig or dict, got {type(cfg).__name__}"
+    )
 
 
 @dataclass
@@ -95,11 +109,13 @@ class RoutedPolicy:
     threshold: float = 0.8
     scorers: tuple = ("arg_agreement", "tool_churn")
     fusion: object = None  # callable signals_dict -> float; None = min()
-    routes: dict = field(default_factory=lambda: {
-        "options_set": "CLARIFY",
-        "tool_churn": "ESCALATE",
-        "arg_agreement": "RETRY",
-    })
+    routes: dict = field(
+        default_factory=lambda: {
+            "options_set": "CLARIFY",
+            "tool_churn": "ESCALATE",
+            "arg_agreement": "RETRY",
+        }
+    )
     tool_config: dict = field(default_factory=dict)  # tool_name -> ToolConfig
 
     def decide(self, step: AgentStep, history=()) -> Gate:
@@ -111,9 +127,7 @@ class RoutedPolicy:
         if not step.signals:  # every scorer failed or none configured
             step.confidence = 0.0
             return "ESCALATE"
-        step.confidence = (
-            self.fusion(step.signals) if self.fusion else min(step.signals.values())
-        )
+        step.confidence = self.fusion(step.signals) if self.fusion else min(step.signals.values())
         if step.confidence >= threshold:
             return "PROCEED"
         weakest = min(step.signals, key=step.signals.get)

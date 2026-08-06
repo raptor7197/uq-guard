@@ -19,15 +19,29 @@ def _rows(n_per_tool=40):
         # book_flight: wrong steps score 0.7-0.85 (unanimous-but-wrong)
         wrong = i % 2 == 1
         conf = 0.75 + 0.1 * (i % 4) if wrong else 0.9 + 0.05 * (i % 4)
-        rows.append({"task": i // 5, "kind": "tie", "step": f"b/{i}", "tool": "book_flight",
-                     "signals": {"arg_agreement": conf, "tool_churn": conf},
-                     "correct": not wrong})
+        rows.append(
+            {
+                "task": i // 5,
+                "kind": "tie",
+                "step": f"b/{i}",
+                "tool": "book_flight",
+                "signals": {"arg_agreement": conf, "tool_churn": conf},
+                "correct": not wrong,
+            }
+        )
         # search_flights: wrong steps score 0.2-0.35 (fabricated origin)
         wrong = i % 3 == 0
         conf = 0.2 + 0.05 * (i % 4) if wrong else 0.8 + 0.1 * (i % 4)
-        rows.append({"task": i // 5 + 100, "kind": "vague", "step": f"s/{i}", "tool": "search_flights",
-                     "signals": {"arg_agreement": conf, "tool_churn": conf},
-                     "correct": not wrong})
+        rows.append(
+            {
+                "task": i // 5 + 100,
+                "kind": "vague",
+                "step": f"s/{i}",
+                "tool": "search_flights",
+                "signals": {"arg_agreement": conf, "tool_churn": conf},
+                "correct": not wrong,
+            }
+        )
     return rows
 
 
@@ -46,7 +60,9 @@ def test_per_tool_thresholds_separate_tools():
 
 
 def test_evaluate_per_tool_reports_and_applies():
-    rows = _rows()
+    # enough tasks that the calibration split holds >= min_wrong wrong steps
+    # per tool; otherwise per_tool_thresholds falls back to the global one
+    rows = _rows(n_per_tool=120)
     results, (conf, y) = evaluate(rows, alpha=0.1, seed=7, per_tool=True)
     assert results["thresholds_per_tool"]
     assert results["per_tool"]["book_flight"]["n_test"] > 0
@@ -61,8 +77,89 @@ def test_evaluate_global_matches_legacy_keys():
     rows = _rows()
     results, _ = evaluate(rows, alpha=0.1, seed=7, per_tool=False)
     # headline keys that existed before per-tool work must still be present
-    for key in ("accepted_error_test", "n_accepted_test", "coverage_test",
-                "wrong_accept_rate_test", "ece_fused_test", "auroc"):
+    for key in (
+        "accepted_error_test",
+        "n_accepted_test",
+        "coverage_test",
+        "wrong_accept_rate_test",
+        "ece_fused_test",
+        "auroc",
+    ):
         assert key in results
     assert results["thresholds_per_tool"] == {}
     assert results["per_tool"] == {}
+
+
+def test_evaluate_requires_three_tasks():
+    import pytest
+
+    rows = [
+        {
+            "task": 0,
+            "kind": "tie",
+            "step": f"s{i}",
+            "tool": "book_flight",
+            "signals": {"arg_agreement": 0.8, "tool_churn": 0.8},
+            "correct": i % 2 == 0,
+        }
+        for i in range(10)
+    ]
+    with pytest.raises(ValueError, match=">= 3 tasks"):
+        evaluate(rows, alpha=0.1)
+
+
+def test_evaluate_requires_two_classes_in_fit_split():
+    import pytest
+
+    # every task is all-correct, so whichever task lands in the fit split
+    # leaves the logistic fusion nothing to learn from
+    rows = []
+    for t in range(3):
+        rows += [
+            {
+                "task": t,
+                "kind": "tie",
+                "step": f"{t}/{i}",
+                "tool": "book_flight",
+                "signals": {"arg_agreement": 0.9, "tool_churn": 0.9},
+                "correct": True,
+            }
+            for i in range(10)
+        ]
+    with pytest.raises(ValueError, match="both correct and wrong"):
+        evaluate(rows, alpha=0.1)
+
+
+def test_per_tool_thresholds_skips_undersampled_tools():
+    # a tool with fewer than min_wrong wrong cal steps must fall back to the
+    # global threshold instead of trusting an accept-all/reject-all swing
+    rows = []
+    # tool A: 20 wrong steps -> enough to set a trustworthy threshold
+    for i in range(20):
+        rows.append(
+            {
+                "task": i,
+                "kind": "tie",
+                "step": f"a{i}",
+                "tool": "book_flight",
+                "signals": {"x": 1.0},
+                "correct": False,
+                "_conf": 0.5 + 0.02 * i,
+            }
+        )
+    # tool B: only 2 wrong steps -> below min_wrong, skipped
+    for i in range(20):
+        rows.append(
+            {
+                "task": 100 + i,
+                "kind": "tie",
+                "step": f"b{i}",
+                "tool": "search_flights",
+                "signals": {"x": 1.0},
+                "correct": i >= 2,
+                "_conf": 0.9,
+            }
+        )
+    thrs = per_tool_thresholds(rows, alpha=0.1)
+    assert "book_flight" in thrs
+    assert "search_flights" not in thrs  # falls back to the global threshold

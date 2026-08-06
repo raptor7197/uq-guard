@@ -59,8 +59,16 @@ def gen_tasks(n, seed=7):
             for j, (t, p) in enumerate(zip(times, prices, strict=True), 1)
         ]
         kind = ["time", "cheapest", "tie", "nodate", "vague"][i % 5]  # balanced classes
-        task = {"id": i, "flights": flights, "origin": a, "dest": b, "date": date,
-                "kind": kind, "ambiguous": False, "book": set()}
+        task = {
+            "id": i,
+            "flights": flights,
+            "origin": a,
+            "dest": b,
+            "date": date,
+            "kind": kind,
+            "ambiguous": False,
+            "book": set(),
+        }
         if kind == "time":
             f = rng.choice(flights)
             task["prompt"] = f"Book the {f['time']} flight from {a} to {b} on {date}."
@@ -98,8 +106,10 @@ def label_step(task, step):
     if tool == "search_flights":
         if not task.get("origin_stated", True):
             return False  # origin fabricated: user never said where from
-        ok = (str(args.get("origin", "")).upper() == task["origin"]
-              and str(args.get("destination", "")).upper() == task["dest"])
+        ok = (
+            str(args.get("origin", "")).upper() == task["origin"]
+            and str(args.get("destination", "")).upper() == task["dest"]
+        )
         if task["date"] is not None and args.get("date") not in (None, task["date"]):
             ok = False
         return ok
@@ -110,8 +120,15 @@ def label_step(task, step):
     return None  # __none__ answers are not gated; skip
 
 
-_TRANSIENT = ("RESOURCE_EXHAUSTED", "429", "name resolution", "ConnectError",
-              "Connection", "timed out", "Timeout")
+_TRANSIENT = (
+    "RESOURCE_EXHAUSTED",
+    "429",
+    "name resolution",
+    "ConnectError",
+    "Connection",
+    "timed out",
+    "Timeout",
+)
 
 
 def label_rows(task, steps, judge=None):
@@ -121,16 +138,25 @@ def label_rows(task, steps, judge=None):
         if label is None:
             history.append(step)
             continue
-        signals = {"arg_agreement": arg_agreement(step, history),
-                   "tool_churn": tool_churn(step, history)}
+        signals = {
+            "arg_agreement": arg_agreement(step, history),
+            "tool_churn": tool_churn(step, history),
+        }
         if judge is not None and step.chosen.tool_name == "book_flight":
             try:
                 signals["options_set"] = judge(step, history)
             except Exception as e:  # judge outage must not kill labeling
                 log.warning("judge failed on %s (%.60s...), skipping signal", step.step_id, e)
-        rows.append({"task": task["id"], "kind": task["kind"], "step": step.step_id,
-                     "tool": step.chosen.tool_name, "signals": signals,
-                     "correct": bool(label)})
+        rows.append(
+            {
+                "task": task["id"],
+                "kind": task["kind"],
+                "step": step.step_id,
+                "tool": step.chosen.tool_name,
+                "signals": signals,
+                "correct": bool(label),
+            }
+        )
         history.append(step)
     return rows
 
@@ -150,15 +176,19 @@ def run_capture(tasks, model, k, judge=None):
             steps = read_trace(trace_file)
             # only the final attempt's thread is a clean run (see retry below)
             last_thread = steps[-1].thread_id
-            task_rows = label_rows(task, [s for s in steps if s.thread_id == last_thread],
-                                   judge)
+            task_rows = label_rows(task, [s for s in steps if s.thread_id == last_thread], judge)
             rows.extend(task_rows)
-            log.info("task %d [%s]: reused trace, %d labeled steps",
-                     task["id"], task["kind"], len(task_rows))
+            log.info(
+                "task %d [%s]: reused trace, %d labeled steps",
+                task["id"],
+                task["kind"],
+                len(task_rows),
+            )
             continue
         api = FakeTravelAPI(task["flights"])
-        capture = CaptureMiddleware(k=k, trace_dir=OUT / "traces",
-                                    run_id=f"cal-{task['id']}-k{k}-{slug}")
+        capture = CaptureMiddleware(
+            k=k, trace_dir=OUT / "traces", run_id=f"cal-{task['id']}-k{k}-{slug}"
+        )
         agent = build_agent(api, model=model, middleware=[capture])
         for attempt in range(6):
             # fresh thread per attempt: steps from a rate-limited attempt must not
@@ -209,14 +239,33 @@ def bootstrap_ci(test, stat, n_boot=1000, seed=7):
     return [round(lo, 3), round(hi, 3)]
 
 
-def per_tool_thresholds(cal, alpha):
+def per_tool_thresholds(cal, alpha, min_wrong=10):
     """{tool: conformal_threshold} computed per step-type on the calibration
     split. The exchangeability mitigation: each tool's threshold is set from
     its own wrong steps, so a tool whose confidence is systematically
-    over/under-expressed doesn't inherit another tool's miscalibration."""
+    over/under-expressed doesn't inherit another tool's miscalibration.
+
+    A tool with fewer than min_wrong wrong calibration steps is SKIPPED and
+    falls back to the global threshold (evaluate() does this via .get(tool,
+    thr)). On tiny wrong-step counts the conformal threshold swings to the
+    extremes -- zero wrong steps -> 0.0 (accept-all, unconstrained error) or
+    one wrong step at max confidence -> reject-all -- so a per-tool number
+    is only trusted once there is enough signal. min_wrong >= 10 is the
+    point where the (n+1) finite-sample correction at alpha=0.1 stops
+    capping at the maximum confidence."""
     out = {}
     for tool in sorted({r["tool"] for r in cal}):
         subset = [r for r in cal if r["tool"] == tool]
+        n_wrong = sum(1 for r in subset if not r["correct"])
+        if n_wrong < min_wrong:
+            log.info(
+                "tool %s: only %d wrong calibration steps (< %d); "
+                "falling back to the global threshold",
+                tool,
+                n_wrong,
+                min_wrong,
+            )
+            continue
         out[tool] = conformal_threshold(
             [r["_conf"] for r in subset], [r["correct"] for r in subset], alpha=alpha
         )
@@ -228,16 +277,28 @@ def evaluate(rows, alpha, seed=7, per_tool=False):
 
     rng = random.Random(seed)
     task_ids = sorted({r["task"] for r in rows})
+    if len(task_ids) < 3:
+        raise ValueError(
+            f"evaluate() needs >= 3 tasks for the fit/cal/test three-way split "
+            f"(got {len(task_ids)}); run with --tasks >= 3 (default 30)"
+        )
     rng.shuffle(task_ids)
     # three-way task-level split: fusion must not be trained on the split that
     # sets the conformal threshold, or the threshold is optimistic
     third = max(1, len(task_ids) // 3)
-    fit_ids, cal_ids = set(task_ids[:third]), set(task_ids[third: 2 * third])
+    fit_ids, cal_ids = set(task_ids[:third]), set(task_ids[third : 2 * third])
     fit = [r for r in rows if r["task"] in fit_ids]
     cal = [r for r in rows if r["task"] in cal_ids]
     test = [r for r in rows if r["task"] not in fit_ids | cal_ids]
 
-    fusion = LogisticFusion().fit([r["signals"] for r in fit], [r["correct"] for r in fit])
+    y_fit = [r["correct"] for r in fit]
+    if len(set(y_fit)) < 2:
+        raise ValueError(
+            f"evaluate(): the logistic fusion needs both correct and wrong steps in "
+            f"the fit split to train (got {len(fit)} rows, all {sorted(set(y_fit))}); "
+            "use more tasks or a seed that puts both classes in the fit split"
+        )
+    fusion = LogisticFusion().fit([r["signals"] for r in fit], y_fit)
     baseline = WeightedSum()
 
     def apply(model, rs):
@@ -265,8 +326,7 @@ def evaluate(rows, alpha, seed=7, per_tool=False):
     err = sum(1 for r in acc if not r["correct"]) / len(acc) if acc else 0.0
 
     def safe_auroc(scores, labels):
-        return (round(roc_auc_score(labels, scores), 3)
-                if len(set(labels)) > 1 else None)
+        return round(roc_auc_score(labels, scores), 3) if len(set(labels)) > 1 else None
 
     def stat_accepted_error(rs):
         acc = accepted(rs)
@@ -293,25 +353,31 @@ def evaluate(rows, alpha, seed=7, per_tool=False):
             "n_cal": sum(1 for r in cal if r["tool"] == tool),
             "n_test": len(subset),
             "accepted_error_test": (
-                round(sum(1 for r in acc_t if not r["correct"]) / len(acc_t), 3)
-                if acc_t else None
+                round(sum(1 for r in acc_t if not r["correct"]) / len(acc_t), 3) if acc_t else None
             ),
             "n_accepted_test": len(acc_t),
             "coverage_test": round(len(acc_t) / len(subset), 3) if subset else None,
         }
 
     results = {
-        "n_tasks": len(task_ids), "n_steps": len(rows),
-        "n_fit": len(fit), "n_cal": len(cal), "n_test": len(test),
+        "n_tasks": len(task_ids),
+        "n_steps": len(rows),
+        "n_fit": len(fit),
+        "n_cal": len(cal),
+        "n_test": len(test),
         "base_wrong_rate_test": round(1 - sum(y_test) / len(y_test), 3) if test else None,
-        "alpha": alpha, "threshold": round(thr, 4),
+        "alpha": alpha,
+        "threshold": round(thr, 4),
         "thresholds_per_tool": {t: round(v, 4) for t, v in tool_thrs.items()},
-        "accepted_error_test": round(err, 3), "n_accepted_test": len(acc),
+        "accepted_error_test": round(err, 3),
+        "n_accepted_test": len(acc),
         "accepted_error_ci95": bootstrap_ci(test, stat_accepted_error, seed=seed),
         # the quantity the conformal threshold actually bounds: P(accept | wrong)
         "wrong_accept_rate_test": round(
             sum(1 for r in test if not r["correct"] and r["_conf"] >= thr_for(r))
-            / max(1, sum(1 for r in test if not r["correct"])), 3),
+            / max(1, sum(1 for r in test if not r["correct"])),
+            3,
+        ),
         "wrong_accept_rate_ci95": bootstrap_ci(test, stat_wrong_accept, seed=seed),
         "coverage_test": round(len(acc) / len(test), 3) if test else None,
         "ece_fused_test": round(ece(conf_test, y_test), 3) if test else None,
@@ -320,8 +386,10 @@ def evaluate(rows, alpha, seed=7, per_tool=False):
             "fused": safe_auroc(conf_test, y_test),
             "fused_ci95": bootstrap_ci(test, stat_auroc, seed=seed),
             "weighted_sum": safe_auroc(apply(baseline, test), y_test),
-            **{name: safe_auroc([r["signals"].get(name, 1.0) for r in test], y_test)
-               for name in sorted({k for r in rows for k in r["signals"]})},
+            **{
+                name: safe_auroc([r["signals"].get(name, 1.0) for r in test], y_test)
+                for name in sorted({k for r in rows for k in r["signals"]})
+            },
         },
         "fusion_coefficients": {k: round(v, 3) for k, v in fusion.coefficients().items()},
     }
@@ -373,26 +441,35 @@ def main():
     ap.add_argument("--k", type=int, default=3)
     ap.add_argument("--alpha", type=float, default=0.1)
     ap.add_argument("--model", default=None)
-    ap.add_argument("--judge", action="store_true",
-                    help="score options_set on booking steps (one model call each)")
+    ap.add_argument(
+        "--judge",
+        action="store_true",
+        help="score options_set on booking steps (one model call each)",
+    )
     ap.add_argument("--seed", type=int, default=7)
-    ap.add_argument("--per-tool", action="store_true",
-                    help="conformal thresholds per step-type/tool (exchangeability "
-                         "mitigation) applied to the test split")
+    ap.add_argument(
+        "--per-tool",
+        action="store_true",
+        help="conformal thresholds per step-type/tool (exchangeability "
+        "mitigation) applied to the test split",
+    )
     args = ap.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s",
-                        datefmt="%H:%M:%S")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(name)s: %(message)s", datefmt="%H:%M:%S"
+    )
     OUT.mkdir(parents=True, exist_ok=True)
     tasks = gen_tasks(args.tasks, seed=args.seed)
     # on_error=None: a judge outage must skip the signal, not poison labels with 0.0
-    judge = (OptionsSetScorer(resolve_model(args.model), tools=("book_flight",), on_error=None)
-             if args.judge else None)
+    judge = (
+        OptionsSetScorer(resolve_model(args.model), tools=("book_flight",), on_error=None)
+        if args.judge
+        else None
+    )
     rows = run_capture(tasks, args.model, args.k, judge=judge)
     (OUT / "steps.json").write_text(json.dumps(rows, indent=1, default=str))
 
-    results, (conf, labels) = evaluate(rows, args.alpha, seed=args.seed,
-                                       per_tool=args.per_tool)
+    results, (conf, labels) = evaluate(rows, args.alpha, seed=args.seed, per_tool=args.per_tool)
     plots(conf, labels)
     (OUT / "results.json").write_text(json.dumps(results, indent=1))
     print(json.dumps(results, indent=1))
