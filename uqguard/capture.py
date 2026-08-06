@@ -46,7 +46,9 @@ def to_candidate(response: ModelResponse) -> CandidateAction:
     if msg.tool_calls:
         first, *rest = msg.tool_calls
         return CandidateAction(
-            tool_name=first["name"], args=first["args"], raw_text=text,
+            tool_name=first["name"],
+            args=first["args"],
+            raw_text=text,
             extra_calls=[{"name": t["name"], "args": t["args"]} for t in rest],
         )
     # answered in text instead of acting -- that disagreement is itself signal
@@ -71,8 +73,18 @@ class _Thread:
 
 
 class CaptureMiddleware(AgentMiddleware):
-    def __init__(self, k: int = 5, trace_dir="runs", run_id: str | None = None,
-                 redact: Callable[[AgentStep], AgentStep] | None = None):
+    def __init__(
+        self,
+        k: int = 5,
+        trace_dir="runs",
+        run_id: str | None = None,
+        redact: Callable[[AgentStep], AgentStep] | None = None,
+    ):
+        if k < 1:
+            raise ValueError(
+                f"CaptureMiddleware(k={k}): k samples per model call must be >= 1 "
+                "(k=0 would record a step with no candidates and crash on candidates[0])"
+            )
         super().__init__()
         self.k = k
         self.trace = TraceWriter(trace_dir, run_id=run_id, redact=redact)
@@ -84,13 +96,22 @@ class CaptureMiddleware(AgentMiddleware):
 
     def current_thread(self) -> str:
         """LangGraph thread id when running inside a graph, else the
-        new_thread() name (single-conversation fallback)."""
+        new_thread() name (single-conversation fallback).
+
+        When the graph config has no ``thread_id``, the per-invocation
+        ``run_id`` (unique per LangGraph invoke) is used so concurrent
+        no-thread-id invocations don't collide on the shared fallback
+        slot (#43). Outside a graph, ``new_thread()`` is the mechanism."""
         try:
             from langgraph.config import get_config
 
-            tid = (get_config() or {}).get("configurable", {}).get("thread_id")
+            cfg = get_config() or {}
+            tid = cfg.get("configurable", {}).get("thread_id")
             if tid is not None:
                 return str(tid)
+            run_id = cfg.get("run_id")
+            if run_id is not None:
+                return f"run:{run_id}"
         except Exception:  # outside a runnable context
             pass
         return self._fallback_thread
@@ -99,15 +120,19 @@ class CaptureMiddleware(AgentMiddleware):
     def _awaiting_human(st: _Thread) -> bool:
         # evicting a thread mid-interrupt would make the resumed tool call find
         # no pending step and execute unapproved -- never evict these
-        return (st.pending is not None and st.pending.gate in ("CLARIFY", "ESCALATE")
-                and st.pending.human_action is None)
+        return (
+            st.pending is not None
+            and st.pending.gate in ("CLARIFY", "ESCALATE")
+            and st.pending.human_action is None
+        )
 
     def _state(self, thread_id: str) -> _Thread:
         st = self._threads.get(thread_id)
         if st is None:
             while len(self._threads) >= _MAX_THREADS:
-                victim = next((t for t, s in self._threads.items()
-                               if not self._awaiting_human(s)), None)
+                victim = next(
+                    (t for t, s in self._threads.items() if not self._awaiting_human(s)), None
+                )
                 if victim is None:
                     break  # everything is mid-interrupt; grow past the cap instead
                 self._flush_thread(victim, None)
@@ -134,8 +159,11 @@ class CaptureMiddleware(AgentMiddleware):
         for tid in {self._fallback_thread, str(name)}:
             if tid in self._threads:
                 if self._awaiting_human(self._threads[tid]):
-                    log.warning("thread %s reset while a gate decision was awaiting a human; "
-                                "resuming that interrupt will find no pending step", tid)
+                    log.warning(
+                        "thread %s reset while a gate decision was awaiting a human; "
+                        "resuming that interrupt will find no pending step",
+                        tid,
+                    )
                 self._flush_thread(tid, None)
                 del self._threads[tid]
         self._fallback_thread = str(name)
@@ -163,25 +191,39 @@ class CaptureMiddleware(AgentMiddleware):
         log.info("%s: sampling %d candidates", step_id, self.k)
         return tid, step_id
 
-    def _record(self, request: ModelRequest, tid: str, step_id: str,
-                responses: list[ModelResponse]) -> ModelResponse:
+    def _record(
+        self, request: ModelRequest, tid: str, step_id: str, responses: list[ModelResponse]
+    ) -> ModelResponse:
         candidates = []
         for i, r in enumerate(responses):
             c = to_candidate(r)
             candidates.append(c)
-            log.info("%s: sample %d/%d -> %s %s", step_id, i + 1, self.k, c.tool_name,
-                     _short(c.args) if c.args else _short(c.raw_text, 60))
+            log.info(
+                "%s: sample %d/%d -> %s %s",
+                step_id,
+                i + 1,
+                self.k,
+                c.tool_name,
+                _short(c.args) if c.args else _short(c.raw_text, 60),
+            )
         distinct = len({(c.tool_name, repr(sorted(c.args.items()))) for c in candidates})
-        log.info("%s: acting on %s %s (%d distinct action(s) across samples)",
-                 step_id, candidates[0].tool_name, _short(candidates[0].args), distinct)
+        log.info(
+            "%s: acting on %s %s (%d distinct action(s) across samples)",
+            step_id,
+            candidates[0].tool_name,
+            _short(candidates[0].args),
+            distinct,
+        )
         user_msgs = [m for m in request.messages if isinstance(m, HumanMessage)]
         self._state(tid).pending = AgentStep(
             step_id=step_id,
             thread_id=tid,
             candidates=candidates,
             chosen=candidates[0],
-            # the user request is the context every action must be grounded in
-            retrieval_context=[str(user_msgs[-1].content)] if user_msgs else [],
+            # the full user-side context: every HumanMessage in the conversation,
+            # not just the last one, so multi-turn requests (e.g. "book the cheap
+            # one" after "I want to go to Paris") are grounded in the full dialog (#44)
+            retrieval_context=[str(m.content) for m in user_msgs],
         )
         return responses[0]
 

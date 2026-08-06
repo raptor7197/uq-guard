@@ -45,6 +45,13 @@ def test_capture_k_samples_and_tool_result_backfill(tmp_path):
     assert steps[1].tool_result is None
 
 
+def test_capture_k_zero_rejected(tmp_path):
+    import pytest
+
+    with pytest.raises(ValueError, match=">= 1"):
+        CaptureMiddleware(k=0, trace_dir=tmp_path, run_id="t")
+
+
 def test_new_thread_flushes_pending(tmp_path):
     mw = CaptureMiddleware(k=1, trace_dir=tmp_path, run_id="t")
     mw.new_thread("a")
@@ -80,8 +87,9 @@ def test_threads_keyed_by_langgraph_thread_id(tmp_path, monkeypatch):
     import langgraph.config
 
     current = {"tid": "conv-a"}
-    monkeypatch.setattr(langgraph.config, "get_config",
-                        lambda: {"configurable": {"thread_id": current["tid"]}})
+    monkeypatch.setattr(
+        langgraph.config, "get_config", lambda: {"configurable": {"thread_id": current["tid"]}}
+    )
     mw = CaptureMiddleware(k=1, trace_dir=tmp_path, run_id="t")
 
     def act(request):
@@ -95,6 +103,47 @@ def test_threads_keyed_by_langgraph_thread_id(tmp_path, monkeypatch):
     assert a is not None and b is not None and a is not b
     assert a.thread_id == "conv-a" and b.thread_id == "conv-b"
     assert mw.history_of("conv-a") == [] and mw.history_of("conv-b") == []
+
+
+def test_no_thread_id_invokes_isolated_by_run_id(tmp_path, monkeypatch):
+    # two interleaved invokes with NO thread_id must not collide on the
+    # shared fallback slot (#43); run_id provides per-invocation isolation
+    import langgraph.config
+
+    current = {"run_id": "run-aaa"}
+    monkeypatch.setattr(langgraph.config, "get_config", lambda: {"run_id": current["run_id"]})
+    mw = CaptureMiddleware(k=1, trace_dir=tmp_path, run_id="t")
+
+    def act(request):
+        return ModelResponse(result=[AIMessage(content="", tool_calls=[BOOK_CALL])])
+
+    mw.wrap_model_call(_req(), act)  # run-aaa step 0, left pending
+    current["run_id"] = "run-bbb"
+    mw.wrap_model_call(_req(), act)  # run-bbb step, must not flush run-aaa's pending
+
+    a, b = mw.pending_of("run:run-aaa"), mw.pending_of("run:run-bbb")
+    assert a is not None and b is not None and a is not b
+    assert a.thread_id == "run:run-aaa" and b.thread_id == "run:run-bbb"
+
+
+def test_capture_carries_multi_turn_user_context(tmp_path):
+    # multi-turn conversation: retrieval_context must include ALL user
+    # messages, not just the last one (#44)
+    mw = CaptureMiddleware(k=1, trace_dir=tmp_path, run_id="t")
+    mw.new_thread("conv")
+
+    messages = [
+        HumanMessage("I want to go to Paris on the cheapest flight."),
+        AIMessage(content="", tool_calls=[BOOK_CALL]),
+        ToolMessage("Found 3 flights.", tool_call_id="x"),
+        HumanMessage("Book the cheap one."),
+    ]
+    mw.wrap_model_call(_req(messages), lambda r: ModelResponse(result=[AIMessage("ok")]))
+    step = mw.pending_of("conv")
+    assert step is not None
+    assert len(step.retrieval_context) == 2
+    assert "Paris" in step.retrieval_context[0]
+    assert "cheap one" in step.retrieval_context[1]
 
 
 def test_eviction_never_drops_a_thread_awaiting_human(tmp_path, monkeypatch):
@@ -121,8 +170,9 @@ def test_eviction_never_drops_a_thread_awaiting_human(tmp_path, monkeypatch):
     assert none.tool_name == "__none__" and none.args == {}
     # parallel tool calls are all captured
     second = {"name": "refund", "args": {"booking_id": "B1"}, "id": "y", "type": "tool_call"}
-    multi = to_candidate(ModelResponse(
-        result=[AIMessage(content="", tool_calls=[BOOK_CALL, second])]))
+    multi = to_candidate(
+        ModelResponse(result=[AIMessage(content="", tool_calls=[BOOK_CALL, second])])
+    )
     assert multi.tool_name == "book_flight"
     assert multi.extra_calls == [{"name": "refund", "args": {"booking_id": "B1"}}]
 

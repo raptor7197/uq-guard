@@ -11,8 +11,7 @@ def _cand(tool="book_flight", **args):
 
 
 def _step(candidates):
-    return AgentStep(step_id="t/0", thread_id="t", candidates=candidates,
-                     chosen=candidates[0])
+    return AgentStep(step_id="t/0", thread_id="t", candidates=candidates, chosen=candidates[0])
 
 
 def test_agreement_scores():
@@ -24,7 +23,9 @@ def test_agreement_scores():
     b = CandidateAction(tool_name="s", args={"b": 2, "a": 1}, raw_text="")
     assert arg_agreement(_step([a, b])) == 1.0
     # answering in text vs acting counts as disagreement
-    mixed = [_cand(flight_id="F1")] * 3 + [CandidateAction(tool_name="__none__", args={}, raw_text="?")] * 2
+    mixed = [_cand(flight_id="F1")] * 3 + [
+        CandidateAction(tool_name="__none__", args={}, raw_text="?")
+    ] * 2
     assert arg_agreement(_step(mixed)) == 0.6
 
 
@@ -45,10 +46,18 @@ def test_agreement_scores_the_chosen_action_not_the_majority():
 
 
 def test_agreement_covers_parallel_calls():
-    one = CandidateAction(tool_name="book_flight", args={"flight_id": "F1"}, raw_text="",
-                          extra_calls=[{"name": "refund", "args": {"booking_id": "B1"}}])
-    two = CandidateAction(tool_name="book_flight", args={"flight_id": "F1"}, raw_text="",
-                          extra_calls=[{"name": "refund", "args": {"booking_id": "B2"}}])
+    one = CandidateAction(
+        tool_name="book_flight",
+        args={"flight_id": "F1"},
+        raw_text="",
+        extra_calls=[{"name": "refund", "args": {"booking_id": "B1"}}],
+    )
+    two = CandidateAction(
+        tool_name="book_flight",
+        args={"flight_id": "F1"},
+        raw_text="",
+        extra_calls=[{"name": "refund", "args": {"booking_id": "B2"}}],
+    )
     assert arg_agreement(_step([one, one.model_copy()])) == 1.0
     assert arg_agreement(_step([one, two])) == 0.5  # batch differs in the 2nd call
 
@@ -69,6 +78,7 @@ def test_policy_escalates_on_empty_or_failing_signals():
 
     def broken(step, history=()):
         raise RuntimeError("judge outage")
+
     broken.name = "broken"
 
     step2 = _step([_cand(flight_id="F1")])
@@ -131,8 +141,9 @@ def test_gate_proceeds_without_interrupt(executed, monkeypatch):
 def test_gate_escalates_approve_executes(executed, monkeypatch):
     calls, handler = executed
     payloads = []
-    monkeypatch.setattr(uqguard.gate, "interrupt",
-                        lambda p: payloads.append(p) or {"action": "approve"})
+    monkeypatch.setattr(
+        uqguard.gate, "interrupt", lambda p: payloads.append(p) or {"action": "approve"}
+    )
     step = _step([_cand(flight_id="F7")] * 4 + [_cand(flight_id="F6")])
     mw = GateMiddleware(FakeCapture(step))
     mw.wrap_tool_call(FakeRequest(), handler)
@@ -157,6 +168,20 @@ def test_gate_passes_through_without_capture(executed):
     mw = GateMiddleware(FakeCapture(None))
     mw.wrap_tool_call(FakeRequest(), handler)
     assert len(calls) == 1
+
+
+def test_gate_warned_threads_stays_bounded():
+    """_warned_threads must not grow unbounded under high thread-id churn (#42)."""
+    import uqguard.gate as gate_mod
+
+    mw = GateMiddleware(FakeCapture(None))
+    cap = gate_mod._WARNED_CAP
+    for i in range(cap + 50):
+        tid = f"thread-{i}"
+        mw.capture = FakeCapture(None)
+        mw.capture.current_thread = lambda _tid=tid: _tid
+        mw.wrap_tool_call(FakeRequest(), lambda r: ToolMessage("ok", tool_call_id="tc1"))
+    assert len(mw._warned_threads) <= cap
 
 
 def test_gate_flushes_partial_evidence_on_decision(executed, monkeypatch):

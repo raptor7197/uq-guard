@@ -24,6 +24,7 @@ after one approve/reject resumes, the rest observe the recorded human_action.
 
 import logging
 import threading
+from collections import OrderedDict
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
@@ -33,6 +34,8 @@ from uqguard.policy import ThresholdPolicy
 from uqguard.step import AgentStep
 
 log = logging.getLogger("uqguard")
+
+_WARNED_CAP = 1024
 
 
 def _blocked(request, content: str) -> ToolMessage:
@@ -48,8 +51,10 @@ def _evidence(step: AgentStep) -> dict:
         "extra_calls": step.chosen.extra_calls,
         "confidence": step.confidence,
         "signals": step.signals,
-        "candidates": [{"tool": c.tool_name, "args": c.args, "extra_calls": c.extra_calls}
-                       for c in step.candidates],
+        "candidates": [
+            {"tool": c.tool_name, "args": c.args, "extra_calls": c.extra_calls}
+            for c in step.candidates
+        ],
     }
 
 
@@ -62,7 +67,9 @@ class GateMiddleware(AgentMiddleware):
         # ponytail: one lock for all threads; per-conversation locks if a slow
         # judge call blocking unrelated conversations ever matters
         self._decide_lock = threading.Lock()
-        self._warned_threads = set()
+        # bounded dedup set: evict oldest entries at the cap so long-running
+        # agents with churning thread ids don't leak memory (issue #42)
+        self._warned_threads: OrderedDict = OrderedDict()
 
     def _gate(self, request) -> ToolMessage | None:
         """Decide once per step; return a blocking ToolMessage or None to execute."""
@@ -70,9 +77,14 @@ class GateMiddleware(AgentMiddleware):
         step = self.capture.pending_of(tid)
         if step is None:  # no captured step (gate used without capture) -> pass through
             if tid not in self._warned_threads:  # a misplumbed capture must not fail silently
-                self._warned_threads.add(tid)
-                log.warning("thread %s: no captured step; gate passing tool calls through "
-                            "(is CaptureMiddleware before GateMiddleware in the list?)", tid)
+                self._warned_threads[tid] = None
+                if len(self._warned_threads) > _WARNED_CAP:
+                    self._warned_threads.popitem(last=False)  # evict oldest
+                log.warning(
+                    "thread %s: no captured step; gate passing tool calls through "
+                    "(is CaptureMiddleware before GateMiddleware in the list?)",
+                    tid,
+                )
             return None
 
         history = self.capture.history_of(tid)
@@ -83,28 +95,39 @@ class GateMiddleware(AgentMiddleware):
                     used = sum(1 for s in history if s.gate == "RETRY")
                     if used >= self.max_retries:
                         step.gate = "ESCALATE"  # retries exhausted, a human decides
-                log.info("%s: gate=%s confidence=%.2f signals=%s",
-                         step.step_id, step.gate, step.confidence, step.signals)
+                log.info(
+                    "%s: gate=%s confidence=%.2f signals=%s",
+                    step.step_id,
+                    step.gate,
+                    step.confidence,
+                    step.signals,
+                )
                 # evidence must survive a crash or unresumed interrupt (issue: lost steps)
                 self.capture.trace.write(step.model_copy(update={"partial": True}))
 
         if step.gate == "RETRY":
             conf = step.confidence if step.confidence is not None else 0.0
-            return _blocked(request, (
-                f"Low-confidence action (confidence {conf:.2f}); not executed. "
-                "Re-read the latest tool results. Only act if the results uniquely satisfy "
-                "the user's request; otherwise say what information is missing."
-            ))
+            return _blocked(
+                request,
+                (
+                    f"Low-confidence action (confidence {conf:.2f}); not executed. "
+                    "Re-read the latest tool results. Only act if the results uniquely satisfy "
+                    "the user's request; otherwise say what information is missing."
+                ),
+            )
 
         if step.gate == "CLARIFY" and step.human_action is None:
             answer = interrupt({"type": "clarify", **_evidence(step)})
             answer = (answer or {}).get("answer", "")
             step.human_action = f"clarified: {answer}"
             log.info("%s: user clarified: %s", step.step_id, answer)
-            return _blocked(request, (
-                f"Tool not executed. The request was ambiguous; the user clarified: "
-                f"{answer!r}. Act on the clarified request."
-            ))
+            return _blocked(
+                request,
+                (
+                    f"Tool not executed. The request was ambiguous; the user clarified: "
+                    f"{answer!r}. Act on the clarified request."
+                ),
+            )
 
         if step.gate == "ESCALATE" and step.human_action is None:
             decision = interrupt({"type": "approve", **_evidence(step)})
@@ -112,10 +135,13 @@ class GateMiddleware(AgentMiddleware):
             log.info("%s: human decision: %s", step.step_id, step.human_action)
 
         if step.human_action == "reject":
-            return _blocked(request, (
-                f"Human reviewer rejected the call to `{request.tool_call['name']}`. The tool "
-                "was not executed. Do not retry unless the user explicitly asks."
-            ))
+            return _blocked(
+                request,
+                (
+                    f"Human reviewer rejected the call to `{request.tool_call['name']}`. The tool "
+                    "was not executed. Do not retry unless the user explicitly asks."
+                ),
+            )
         return None
 
     def wrap_tool_call(self, request, handler):

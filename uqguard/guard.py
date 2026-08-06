@@ -31,15 +31,36 @@ log = logging.getLogger("uqguard")
 class Guard:
     """Passing `policy=` overrides `threshold`/`scorers`/`fusion`/`tool_config`."""
 
-    def __init__(self, k=5, scorers=("arg_agreement", "tool_churn"), threshold=0.8,
-                 fusion=None, policy=None, tool_config=None, trace_dir="runs",
-                 max_retries=1, redact=None):
+    def __init__(
+        self,
+        k=5,
+        scorers=("arg_agreement", "tool_churn"),
+        threshold=0.8,
+        fusion=None,
+        policy=None,
+        tool_config=None,
+        trace_dir="runs",
+        max_retries=1,
+        redact=None,
+    ):
+        if k < 1:
+            raise ValueError(
+                f"Guard(k={k}): k is the number of candidate samples per model call "
+                "and must be >= 1 (k=0 would leave the step with no candidates)"
+            )
         if k < 2:
-            log.warning("Guard(k=%d): consistency scorers need k >= 2 samples to disagree; "
-                        "only judge-type scorers will produce signal", k)
+            log.warning(
+                "Guard(k=%d): consistency scorers need k >= 2 samples to disagree; "
+                "only judge-type scorers will produce signal",
+                k,
+            )
         self.capture = CaptureMiddleware(k=k, trace_dir=trace_dir, redact=redact)
-        self.policy = policy or RoutedPolicy(threshold=threshold, scorers=tuple(scorers),
-                                             fusion=fusion, tool_config=tool_config or {})
+        self.policy = policy or RoutedPolicy(
+            threshold=threshold,
+            scorers=tuple(scorers),
+            fusion=fusion,
+            tool_config=tool_config or {},
+        )
         self.gate = GateMiddleware(self.capture, self.policy, max_retries=max_retries)
 
     @property
