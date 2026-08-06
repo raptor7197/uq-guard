@@ -9,18 +9,35 @@ imputed as `missing` (default 0.5, neutral) -- NOT 1.0: "the scorer never
 ran" must not read as "the scorer approved". Judge outages in the live gate
 score an explicit 0.0 (fail-closed) rather than going missing; see
 scorers/options.py.
+
+LogisticFusion learns the canonical signal set from its fit data; WeightedSum
+is label-free so it takes the canonical set explicitly via `names=` -- when
+`names` is None it has no way to know a signal is missing and scores only the
+signals present (re-normalized).
 """
 
 
 class WeightedSum:
-    def __init__(self, weights=None):
+    """Weighted mean of signals; needs no labels.
+
+    missing: value imputed for a signal absent at inference time. Neutral 0.5,
+             NOT 1.0 -- "the scorer never ran" must not read as approval.
+    names:   the canonical signal set. Signals in `names` missing from a call
+             impute at `missing`; signals outside `names` are ignored. Pass
+             names for judge-bearing signal sets so an outage stays neutral.
+    """
+
+    def __init__(self, weights=None, missing: float = 0.5, names: set | None = None):
         self.weights = weights or {}
+        self.missing = missing
+        self.names = names
 
     def __call__(self, signals):
         if not signals:
             return 0.0  # no evidence is not full confidence
-        num = sum(self.weights.get(k, 1.0) * v for k, v in signals.items())
-        den = sum(self.weights.get(k, 1.0) for k in signals)
+        names = self.names if self.names is not None else set(signals)
+        num = sum(self.weights.get(n, 1.0) * signals.get(n, self.missing) for n in names)
+        den = sum(self.weights.get(n, 1.0) for n in names)
         return num / den
 
 
