@@ -23,10 +23,28 @@ _BUGS = (TypeError, AttributeError, KeyError, IndexError, NameError, AssertionEr
 
 # provider/network failure fingerprints, matched against class name + message
 _PROVIDER = (
-    "429", "500", "502", "503", "504", "rate limit", "ratelimit", "quota",
-    "resource_exhausted", "overloaded", "timeout", "timed out", "connection",
-    "connect", "unavailable", "temporarily", "server error", "apierror",
-    "apistatuserror", "apiconnection", "internalservererror", "servicetier",
+    "429",
+    "500",
+    "502",
+    "503",
+    "504",
+    "rate limit",
+    "ratelimit",
+    "quota",
+    "resource_exhausted",
+    "overloaded",
+    "timeout",
+    "timed out",
+    "connection",
+    "connect",
+    "unavailable",
+    "temporarily",
+    "server error",
+    "apierror",
+    "apistatuserror",
+    "apiconnection",
+    "internalservererror",
+    "servicetier",
 )
 
 
@@ -56,8 +74,11 @@ class ModelFallbackMiddleware(AgentMiddleware):
         """Activate the fallback for a provider error; re-raise anything else."""
         if not _provider_error(e):
             raise e
-        log.warning("primary model failed (%s: %s), switching to fallback model",
-                    type(e).__name__, str(e)[:120])
+        log.warning(
+            "primary model failed (%s: %s), switching to fallback model",
+            type(e).__name__,
+            str(e)[:120],
+        )
         self.active = True
 
     def wrap_model_call(self, request, handler):

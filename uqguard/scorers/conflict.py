@@ -39,7 +39,8 @@ class ToolChurn:
 
     def __call__(self, step, history=()) -> float:
         prior_flails = [
-            s for s in history
+            s
+            for s in history
             if s.chosen.tool_name == step.chosen.tool_name
             and s.chosen.args != step.chosen.args
             and s.tool_result is not None

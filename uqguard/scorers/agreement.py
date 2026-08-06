@@ -15,8 +15,15 @@ from datetime import datetime
 
 from uqguard.scorers.base import register_scorer
 
-_DATE_FORMATS = ("%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y", "%d.%m.%Y", "%b %d, %Y",
-                 "%d %b %Y", "%B %d, %Y")
+_DATE_FORMATS = (
+    "%Y-%m-%d",
+    "%Y/%m/%d",
+    "%m/%d/%Y",
+    "%d.%m.%Y",
+    "%b %d, %Y",
+    "%d %b %Y",
+    "%B %d, %Y",
+)
 
 
 def normalize_value(v):
@@ -65,9 +72,7 @@ class ArgAgreement:
         if self.normalize:
             args = self.normalize(candidate.tool_name, args)
         calls = [{"name": candidate.tool_name, "args": args}, *candidate.extra_calls]
-        return candidate.tool_name, json.dumps(
-            normalize_value(calls), sort_keys=True, default=str
-        )
+        return candidate.tool_name, json.dumps(normalize_value(calls), sort_keys=True, default=str)
 
     def __call__(self, step, history=()) -> float:
         if not step.candidates:

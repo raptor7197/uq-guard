@@ -27,8 +27,12 @@ class TraceWriter:
     file with a reset step counter -- step ids can collide and read_trace will
     merge them. Use a fresh run_id per process."""
 
-    def __init__(self, trace_dir="runs", run_id: str | None = None,
-                 redact: Callable[[AgentStep], AgentStep] | None = None):
+    def __init__(
+        self,
+        trace_dir="runs",
+        run_id: str | None = None,
+        redact: Callable[[AgentStep], AgentStep] | None = None,
+    ):
         run_id = run_id or datetime.now().strftime("%Y%m%d-%H%M%S")
         self.path = Path(trace_dir) / f"{run_id}.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)

@@ -70,12 +70,15 @@ uv sync
 export GOOGLE_API_KEY=...            # or OPENROUTER_API_KEY / OPENAI_API_KEY / OLLAMA_API_KEY
 uv run python examples/demo_agent.py --k 5 --gate --judge          # 10 seeded tasks
 uv run python examples/demo_agent.py --k 5 --gate --tool-threshold refund:1.0  # per-tool strictness
+uv run python examples/integrate_existing_agent.py --k 5 --gate --judge  # bolt the guard onto an existing agent
 uv run python examples/demo_rag.py --k 3                           # semantic_entropy + retrieval_support
 uv run python eval/calibrate.py --tasks 30 --k 3 --per-tool        # per-step-type conformal calibration
 uv run streamlit run ui/audit.py                                   # audit trail UI
 ```
 
 The demo travel agent is instructed to never ask questions — half its tasks are deliberately ambiguous, so it books wrong things silently. With the gate on: clear tasks pass untouched; ambiguous ones pause with evidence.
+
+`examples/integrate_existing_agent.py` is the integration walkthrough: it starts with a plain customer-support agent (`build_agent`, unchanged) and shows the four steps to bolt the guard on — `middleware=guard.middleware` + a checkpointer at `create_agent` time, the interrupt/resume loop, `guard.new_thread()` per conversation, plus per-tool `ToolConfig` strictness, the `options_set` judge, and PII redaction for the trace. Run without `--gate` for the unguarded baseline, with `--gate` for the guarded run.
 
 The RAG demo (`examples/demo_rag.py`) is where the two text-era scorers live: it answers questions from a small policy-document store, and one task is deliberately *not in the docs* — the fabricated answer collapses `semantic_entropy` and `retrieval_support` together, which the travel demo's tool-call steps can't show.
 

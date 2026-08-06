@@ -23,11 +23,43 @@ from uqguard.scorers.base import register_scorer
 _WORD = re.compile(r"[a-z0-9]+")
 
 # tokens that carry no grounding signal; keep the list tiny and honest
-_STOPWORDS = frozenset({
-    "the", "a", "an", "to", "of", "in", "on", "for", "and", "with", "is", "are",
-    "was", "were", "be", "it", "i", "you", "we", "they", "that", "this", "do",
-    "does", "did", "please", "my", "your", "our", "me", "us", "what", "how",
-})
+_STOPWORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "to",
+        "of",
+        "in",
+        "on",
+        "for",
+        "and",
+        "with",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "it",
+        "i",
+        "you",
+        "we",
+        "they",
+        "that",
+        "this",
+        "do",
+        "does",
+        "did",
+        "please",
+        "my",
+        "your",
+        "our",
+        "me",
+        "us",
+        "what",
+        "how",
+    }
+)
 
 
 class RetrievalSupport:

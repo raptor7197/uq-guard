@@ -39,14 +39,30 @@ DOCS = {
 
 # grounded prompts are answered by exactly one doc; the last one matches nothing
 TASKS = [
-    {"id": 1, "grounded": True, "doc": "refund-policy",
-     "prompt": "What is the refund policy for bookings cancelled within 48 hours?"},
-    {"id": 2, "grounded": True, "doc": "baggage-policy",
-     "prompt": "How many bags can I check and what does an extra bag cost?"},
-    {"id": 3, "grounded": True, "doc": "loyalty-program",
-     "prompt": "How many loyalty points do I earn per dollar spent on hotels?"},
-    {"id": 4, "grounded": False, "doc": None,
-     "prompt": "What is the compensation policy for weather-delayed flights?"},
+    {
+        "id": 1,
+        "grounded": True,
+        "doc": "refund-policy",
+        "prompt": "What is the refund policy for bookings cancelled within 48 hours?",
+    },
+    {
+        "id": 2,
+        "grounded": True,
+        "doc": "baggage-policy",
+        "prompt": "How many bags can I check and what does an extra bag cost?",
+    },
+    {
+        "id": 3,
+        "grounded": True,
+        "doc": "loyalty-program",
+        "prompt": "How many loyalty points do I earn per dollar spent on hotels?",
+    },
+    {
+        "id": 4,
+        "grounded": False,
+        "doc": None,
+        "prompt": "What is the compensation policy for weather-delayed flights?",
+    },
 ]
 
 
@@ -89,7 +105,8 @@ def main():
 
     logging.basicConfig(
         level=logging.WARNING if args.quiet else logging.INFO,
-        format="%(asctime)s %(name)s: %(message)s", datefmt="%H:%M:%S",
+        format="%(asctime)s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
     )
 
     from demo_agent import resolve_model
@@ -101,12 +118,12 @@ def main():
 
     tasks = [t for t in TASKS if args.task is None or t["id"] == args.task]
     for task in tasks:
-        capture = CaptureMiddleware(k=args.k, trace_dir="runs",
-                                    run_id=f"rag-{task['id']}")
+        capture = CaptureMiddleware(k=args.k, trace_dir="runs", run_id=f"rag-{task['id']}")
         agent = build_agent(resolve_model(args.model), middleware=[capture])
         capture.new_thread(f"rag{task['id']}")
-        agent.invoke({"messages": [{"role": "user", "content": task["prompt"]}]},
-                     {"recursion_limit": 6})
+        agent.invoke(
+            {"messages": [{"role": "user", "content": task["prompt"]}]}, {"recursion_limit": 6}
+        )
         capture._flush(None)
 
         # score every flushed step; the last one is the final answer
@@ -120,18 +137,24 @@ def main():
         print(f"\ntask {task['id']} (grounded: {task['grounded']}): {task['prompt']!r}")
         for step, ent, sup in lines:
             kind = "ANSWER" if step.chosen.tool_name == "__none__" else step.chosen.tool_name
-            print(f"  {step.step_id:>14} [{kind:>6}] "
-                  f"semantic_entropy={ent:5.2f} retrieval_support={sup:5.2f}")
+            print(
+                f"  {step.step_id:>14} [{kind:>6}] "
+                f"semantic_entropy={ent:5.2f} retrieval_support={sup:5.2f}"
+            )
         if not lines:  # no steps flushed (e.g. the run errored): nothing to score
             print("  -> no steps captured (run errored?)")
             continue
         final = lines[-1]
         flag = min(final[1], final[2]) < 0.5
-        print(f"  -> final answer confidence=min({final[1]:.2f},{final[2]:.2f}) "
-              f"= {min(final[1], final[2]):.2f} {'FLAGGED for review' if flag else 'OK'}")
+        print(
+            f"  -> final answer confidence=min({final[1]:.2f},{final[2]:.2f}) "
+            f"= {min(final[1], final[2]):.2f} {'FLAGGED for review' if flag else 'OK'}"
+        )
     if args.task is None:
-        print("\nnote: trace per task in runs/rag-<id>.jsonl; answer text at "
-              "step.chosen.raw_text via read_trace()")
+        print(
+            "\nnote: trace per task in runs/rag-<id>.jsonl; answer text at "
+            "step.chosen.raw_text via read_trace()"
+        )
 
 
 if __name__ == "__main__":

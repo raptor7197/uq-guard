@@ -15,12 +15,15 @@ def _ok():
     return ModelResponse(result=[AIMessage("ok")])
 
 
-@pytest.mark.parametrize("err", [
-    RuntimeError("429 RESOURCE_EXHAUSTED"),
-    ConnectionError("connection refused"),
-    TimeoutError("request timed out"),
-    RuntimeError("503 Service Unavailable"),
-])
+@pytest.mark.parametrize(
+    "err",
+    [
+        RuntimeError("429 RESOURCE_EXHAUSTED"),
+        ConnectionError("connection refused"),
+        TimeoutError("request timed out"),
+        RuntimeError("503 Service Unavailable"),
+    ],
+)
 def test_provider_errors_trigger_fallback(err):
     mw = ModelFallbackMiddleware("sentinel")
     mw._fallback = fallback = object()
@@ -36,12 +39,15 @@ def test_provider_errors_trigger_fallback(err):
     assert seen == ["primary", fallback] and mw.active
 
 
-@pytest.mark.parametrize("err", [
-    TypeError("'NoneType' object is not subscriptable"),
-    AttributeError("no attribute 'tool_calls'"),
-    KeyError("args"),
-    ValueError("some downstream bug"),
-])
+@pytest.mark.parametrize(
+    "err",
+    [
+        TypeError("'NoneType' object is not subscriptable"),
+        AttributeError("no attribute 'tool_calls'"),
+        KeyError("args"),
+        ValueError("some downstream bug"),
+    ],
+)
 def test_programming_errors_reraise(err):
     mw = ModelFallbackMiddleware("sentinel")
 
