@@ -22,8 +22,7 @@ def _cand(tool="book_flight", **args):
 
 def _step(candidates=None):
     candidates = candidates or [_cand(flight_id="F1")]
-    return AgentStep(step_id="t/0", thread_id="t", candidates=candidates,
-                     chosen=candidates[0])
+    return AgentStep(step_id="t/0", thread_id="t", candidates=candidates, chosen=candidates[0])
 
 
 def test_conformal_threshold_bounds_wrong_acceptance():
@@ -42,19 +41,35 @@ def test_conformal_no_wrong_examples():
     assert conformal_threshold([0.9, 0.8], [True, True], alpha=0.1) == 0.0
 
 
-def test_conformal_threshold_excludes_ties():
-    # unanimous-but-wrong steps all score 1.0; with >= acceptance a threshold
-    # of exactly 1.0 would accept 100% of them against alpha=0.1
+def test_conformal_threshold_capped_at_one_no_lockout():
+    # unanimous-but-wrong steps all score 1.0. The threshold MUST NOT be
+    # nudged above 1.0 -- that would reject every action ever, even perfect
+    # confident-correct ones (the gate locks out). It caps at 1.0 and the
+    # empirical accepted-error is reported honestly instead of silently
+    # rejecting everything.
     conf = [1.0, 1.0, 1.0, 1.0, 0.9]
     correct = [False, False, False, False, True]
     t = conformal_threshold(conf, correct, alpha=0.1)
-    wrong_accepted = sum(1 for c, ok in zip(conf, correct, strict=True) if not ok and c >= t)
-    assert wrong_accepted == 0
+    assert t <= 1.0  # never > 1.0: correct confident steps stay accepted
+    err, n = accepted_error(conf, correct, t)
+    assert n == 4  # the 1.0 ties are accepted under >= ...
+    assert err == 1.0  # ... and the honest rate is reported, not hidden
+
+
+def test_conformal_threshold_never_exceeds_one():
+    # however small the calibration set, the gate must never lock out
+    assert conformal_threshold([1.0], [False], alpha=0.1) <= 1.0
+    assert conformal_threshold([1.0, 1.0], [False, True], alpha=0.1) <= 1.0
+    assert conformal_threshold([0.99, 1.0], [False, True], alpha=0.1) <= 1.0
 
 
 def test_fusion_imputes_missing_signals_neutrally():
-    data = [({"a": 1.0, "j": 1.0}, True), ({"a": 0.9, "j": 0.8}, True),
-            ({"a": 0.2, "j": 0.1}, False), ({"a": 0.1, "j": 0.3}, False)]
+    data = [
+        ({"a": 1.0, "j": 1.0}, True),
+        ({"a": 0.9, "j": 0.8}, True),
+        ({"a": 0.2, "j": 0.1}, False),
+        ({"a": 0.1, "j": 0.3}, False),
+    ]
     fusion = LogisticFusion().fit([d for d, _ in data], [y for _, y in data])
     # a missing judge signal reads as 0.5 (neutral), not 1.0 (approval)
     assert fusion({"a": 1.0}) == fusion({"a": 1.0, "j": 0.5})
@@ -63,6 +78,20 @@ def test_fusion_imputes_missing_signals_neutrally():
 
 def test_weighted_sum_empty_signals_zero():
     assert WeightedSum()({}) == 0.0  # no evidence is not full confidence
+
+
+def test_weighted_sum_imputes_missing_signals_neutrally():
+    # with the canonical names known, a missing judge signal imputes 0.5
+    # (neutral) -- it must not read as agreement (1.0)
+    ws = WeightedSum(names={"a", "b", "j"})
+    assert ws({"a": 1.0, "b": 0.0}) == pytest.approx((1.0 + 0.0 + 0.5) / 3)
+    assert ws({"a": 1.0, "b": 1.0}) == pytest.approx((1.0 + 1.0 + 0.5) / 3)  # < 1.0
+    assert ws({"a": 1.0, "b": 1.0, "j": 1.0}) == 1.0  # judge present and approving
+    # without names there is no way to know a signal is missing: re-normalize
+    # over the signals present (documented fallback)
+    assert WeightedSum()({"a": 1.0, "b": 1.0}) == 1.0
+    # missing value is configurable
+    assert WeightedSum(names={"a", "j"}, missing=0.0)({"a": 1.0}) == pytest.approx(0.5)
 
 
 def test_risk_coverage_and_ece_shapes():
@@ -89,6 +118,7 @@ def test_routed_policy_routes_by_weakest_signal():
     def fixed(name, value):
         def scorer(step, history=()):
             return value
+
         scorer.name = name
         return scorer
 
@@ -207,3 +237,11 @@ def test_guard_facade_builds_middleware(tmp_path):
     assert guard.gate.policy.threshold == 0.7
     guard.new_thread("x")
     assert guard.capture.current_thread() == "x"
+
+
+def test_guard_rejects_k_zero(tmp_path):
+    # k=0 would leave a step with no candidates and crash on candidates[0]
+    from uqguard import Guard
+
+    with pytest.raises(ValueError, match=">= 1"):
+        Guard(k=0, trace_dir=tmp_path)

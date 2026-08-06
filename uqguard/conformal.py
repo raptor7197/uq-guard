@@ -23,7 +23,16 @@ def conformal_threshold(confidences, correct, alpha=0.1):
     nudged just above the quantile value so tied wrong steps do NOT count as
     accepted -- otherwise a calibration set whose wrong steps all score 1.0
     (unanimous-but-wrong, the tie-break class) would yield t=1.0 and accept
-    100% of them under >=."""
+    100% of them under >=.
+
+    The nudge is capped at 1.0. Without the cap, a single wrong calibration
+    step at confidence 1.0 pushes the threshold to 1.0000000000000002 and
+    NO step is ever accepted afterwards -- including perfect confident-
+    correct ones (the gate locks out entirely). When wrong steps sit at the
+    maximum confidence the alpha bound is simply unreachable (any threshold
+    <= 1.0 accepts them); we cap at 1.0 and let the empirical accepted-error
+    / wrong-acceptance metrics report that honestly rather than silently
+    rejecting every action."""
     wrong = np.asarray(
         [c for c, ok in zip(confidences, correct, strict=True) if not ok], dtype=float
     )
@@ -31,7 +40,7 @@ def conformal_threshold(confidences, correct, alpha=0.1):
         return 0.0  # never saw a wrong step: accept everything (and say so)
     q = min(1.0, math.ceil((wrong.size + 1) * (1 - alpha)) / wrong.size)
     t = float(np.quantile(wrong, q, method="higher"))
-    return float(np.nextafter(t, np.inf))
+    return min(1.0, float(np.nextafter(t, np.inf)))
 
 
 def accepted_error(confidences, correct, threshold):
