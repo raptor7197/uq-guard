@@ -14,8 +14,9 @@ dependencies = [
 
 [project.optional-dependencies]
 # LogisticFusion.fit and eval/calibrate.py need these; core gating does not.
+# eval/run_when2call.py additionally needs `datasets` to load the benchmark.
 # Keep floors in sync with the dev group below (single source of truth).
-eval = ["scikit-learn>=1.4", "matplotlib>=3.8"]
+eval = ["scikit-learn>=1.4", "matplotlib>=3.8", "datasets>=3"]
 
 [dependency-groups]
 dev = [
@@ -26,6 +27,7 @@ dev = [
     "langchain-google-genai>=4.2.7",
     "scikit-learn>=1.4",
     "matplotlib>=3.8",
+    "datasets>=3",
     "streamlit>=1.59.1",
     "pytest-cov>=7.1.0",
     "hypothesis>=6.165.2",

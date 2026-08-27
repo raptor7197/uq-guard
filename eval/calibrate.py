@@ -396,13 +396,14 @@ def evaluate(rows, alpha, seed=7, per_tool=False):
     return results, (conf_test, y_test)
 
 
-def plots(conf, labels):
+def plots(conf, labels, out_dir=None):
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import numpy as np
 
+    out_dir = OUT if out_dir is None else out_dir
     ink, muted, blue = "#374151", "#9ca3af", "#2563eb"
     for fig_name, draw in {"risk_coverage": True, "reliability": False}.items():
         fig, ax = plt.subplots(figsize=(5, 3.5), dpi=150)
@@ -431,7 +432,7 @@ def plots(conf, labels):
             spine.set_color(muted)
         ax.tick_params(colors=ink, labelsize=8)
         fig.tight_layout()
-        fig.savefig(OUT / f"{fig_name}.png")
+        fig.savefig(out_dir / f"{fig_name}.png")
         plt.close(fig)
 
 

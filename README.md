@@ -73,6 +73,7 @@ uv run python examples/demo_agent.py --k 5 --gate --tool-threshold refund:1.0  #
 uv run python examples/integrate_existing_agent.py --k 5 --gate --judge  # bolt the guard onto an existing agent
 uv run python examples/demo_rag.py --k 3                           # semantic_entropy + retrieval_support
 uv run python eval/calibrate.py --tasks 30 --k 3 --per-tool        # per-step-type conformal calibration
+uv run python eval/run_when2call.py --n 60 --k 3                   # When2Call: call/ask/decline benchmark
 uv run streamlit run ui/audit.py                                   # audit trail UI
 ```
 
@@ -84,7 +85,7 @@ The RAG demo (`examples/demo_rag.py`) is where the two text-era scorers live: it
 
 ## Results
 
-All numbers below come from `eval/calibrate.py` (generated tasks, programmatic ground truth) and are copied from `eval/out/results.json`. Small-scale run — 29 tasks, k=3, gemini-flash-lite, 90 labeled action steps (41 fit / 49 test) — treat as demonstration, not benchmark. τ²-bench / When2Call evaluation is the roadmap's next step.
+All numbers below come from `eval/calibrate.py` (generated tasks, programmatic ground truth) and are copied from `eval/out/results.json`. Small-scale run — 29 tasks, k=3, gemini-flash-lite, 90 labeled action steps (41 fit / 49 test) — treat as demonstration, not benchmark. τ²-bench evaluation is still the roadmap's next step.
 
 > **Methodology note:** these numbers predate two fixes now in `eval/calibrate.py`: the split is now three-way at task level (fusion-train / conformal-calibration / test — previously the threshold was computed on the fusion's own training split, which biases it optimistic), and headline metrics now carry task-level bootstrap 95% CIs. The table will be regenerated on the next calibration run.
 
@@ -99,6 +100,21 @@ All numbers below come from `eval/calibrate.py` (generated tasks, programmatic g
 | per-tool thresholds (`--per-tool`) | computed per step-type on the calibration split; per-tool accepted-error/coverage reported in `results.json["per_tool"]` |
 
 Findings, including the negative one: fusion beats each single signal on AUROC (with only two free signals, logistic fusion ties a plain average — expected). Accepting only above the conformal threshold cuts the wrong-action rate among executed actions from 53% to 23% at 61% coverage. **The conformal bound itself did not transfer**: P(accept | wrong) was 0.269 on test against a 0.10 target — the exchangeability violation we documented up front (steps are correlated within tasks; n is small), not a surprise. Per-step-type calibration and larger calibration sets are the v2 mitigation. The `options_set` judge is excluded from this calibration run (free-tier daily quota); it is validated qualitatively in the live gate runs documented in [docs/progress.md](docs/progress.md).
+
+### When2Call
+
+`eval/run_when2call.py` runs the same fuse-and-calibrate machinery against [`nvidia/When2Call`](https://huggingface.co/datasets/nvidia/When2Call) (`test` config, `mcq` split) — a single-turn, real-world benchmark of whether a model should call a tool, ask a follow-up question, or say it can't help. Numbers below: 60 examples, k=3, `ollama_cloud:gpt-oss:120b`, seed 7, copied from `eval/out/when2call/results.json`.
+
+Scope, stated up front: this only scores the binary decision UQ-Guard's architecture actually makes — call a tool or don't (PROCEED vs not) — against the ground truth's `tool_call` vs `{request_for_info, cannot_answer}`. Disambiguating the latter two is a separate text-classification problem nothing here attempts.
+
+| metric (n=60) | value |
+|---|---|
+| binary decision accuracy (call vs no-call) | 44/60 = **0.733** |
+| AUROC — arg_agreement (only signal available; single-turn has no history for tool_churn) | 0.555 |
+| wrong-action rate among accepted @ α=0.1 threshold | undefined — 0 accepted (0% coverage) |
+| no-tool predictions, ground-truth split | cannot_answer 20, request_for_info 13, tool_call 3 (false negatives) |
+
+Findings, including the negative one: k=3 sample agreement is a much weaker confidence signal here (AUROC 0.555, near chance) than on the multi-step booking task above (0.692–0.865). Plausible reason: When2Call's ambiguity is mostly in whether calling is appropriate at all, not in which arguments to use — a model can unanimously agree to call the wrong tool, or unanimously decline correctly, either way scoring `arg_agreement=1.0` regardless of correctness. At n=60 the conformal threshold (0.72) accepts nothing on the 20-row test split — too little calibration data for this signal at this task to clear α=0.1 confidently. Consistent-only signals evidently need a task where the *action* is what's uncertain, not just whether to act; When2Call is closer to the tie-break blindspot the options-set judge exists for.
 
 ## Positioning
 
