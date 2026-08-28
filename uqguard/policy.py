@@ -31,7 +31,11 @@ log = logging.getLogger("uqguard")
 def _score(step: AgentStep, history, scorers) -> None:
     for entry in scorers:
         fn = get_scorer(entry) if isinstance(entry, str) else entry  # name or instance
-        name = entry if isinstance(entry, str) else getattr(entry, "name", entry.__name__)
+        # getattr's default arg is evaluated eagerly regardless of whether "name"
+        # is found, so entry.__name__ can't sit there directly -- a scorer
+        # instance (e.g. OptionsSetScorer) has .name but no __name__, and would
+        # crash on the eager lookup before getattr ever runs.
+        name = entry if isinstance(entry, str) else getattr(entry, "name", None) or entry.__name__
         try:
             step.signals[name] = fn(step, history)
         except Exception:

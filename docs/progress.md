@@ -1,6 +1,6 @@
 # uq-guard progress log
 
-last updated: 2026-07-10. companion to spec.md (build plan) and prd.md (research landscape).
+last updated: 2026-08-27. companion to spec.md (build plan) and prd.md (research landscape).
 
 ## status: phases 0-6 done (v1 complete, see caveats in what remains)
 
@@ -79,7 +79,8 @@ full codebase audit 2026-07-10: see audit.md, 18 findings, all tracked as github
 
 - pypi publish: build artifacts ready in dist/, publish is a user action (needs pypi account/token)
 - judge-inclusive calibration rerun: flash-lite daily quota (500/day) was exhausted 2026-07-10; rerun `eval/calibrate.py --tasks 30 --k 3 --judge` after reset, saved traces reload for free and only judge calls cost quota
-- tau2-bench via agentuq harness and when2call: need real api budget, hundreds of calls minimum, not feasible on free tier
+- tau2-bench via agentuq harness: real blockers found round 4 (below), not just budget — scoped as a follow-up
+- when2call: done round 4 (below)
 - demo video
 - rotate the gemini api key, it appeared in a chat transcript
 
@@ -99,3 +100,30 @@ full codebase audit 2026-07-10: see audit.md, 18 findings, all tracked as github
 - **#39 tiny-dataset eval crash**: `calibrate.evaluate()` raises actionable errors for < 3 tasks (three-way split impossible) and for a one-class fit split (sklearn `ValueError`), instead of a cryptic solver error.
 - **#40 per-tool threshold swings**: `per_tool_thresholds(cal, alpha, min_wrong=10)` skips a tool with fewer than 10 wrong calibration steps (below the floor the (n+1) correction needs at alpha=0.1) and it falls back to the global threshold, so tiny splits can't set accept-all (0.0) or reject-all thresholds.
 - validation: 9 new/updated tests (99 total, all offline), ruff clean.
+
+## round 3b (2026-08-06): closed the rest of the audit + coverage to 100%
+
+Picked up from a stalled prior session (its transcript was investigated, cross-checked against the actual repo state, then discarded — the 5 commits below matched it exactly, nothing was lost).
+
+- **#34 license**: MIT `LICENSE`, (c) 2026 raptor7197.
+- **#41 formatting/CI**: `ruff format` across the codebase, `ruff format --check` added to CI so drift fails the build.
+- **#42 unbounded warning registry**: the warned-thread registry is now a bounded `OrderedDict` (cap 1024, evict oldest) so a long-lived deployment with unbounded distinct threads can't grow it forever.
+- **#43 run-id collision**: a model call with no `thread_id` in its config now keys state by the per-invocation `run_id` instead of a shared fallback slot, so concurrent no-thread-id invocations stop colliding.
+- **#44 single-turn context**: `retrieval_context` now carries every `HumanMessage` in the conversation (bounded by `_join_context`), not just the last one, so multi-turn requests ("book the cheap one" after "I want to go to Paris") are judged against the full dialog.
+- `tests/test_edge_cases.py` (21 tests) + `tests/test_properties.py` (13 hypothesis invariants: conformal threshold bounds/monotonicity/finite-sample wrong-acceptance bound, `normalize_value` idempotence, unit-interval scorer outputs, `to_candidate` robustness) — statement coverage 637/637 (was 96%), 137 tests total.
+- `examples/integrate_existing_agent.py`: walkthrough for bolting the guard onto an existing customer-support agent (per-tool `ToolConfig`, judge scorer, PII redaction); README updated to match.
+- validation: 137 tests, ruff check + format clean. all 5 commits pushed to `origin/main` (`97d66aa..c8aebbd`).
+
+## round 4 (2026-08-27): P5 eval harness, When2Call track
+
+Roadmap phase P5 (github issue #1) calls for real-benchmark eval against tau2-bench and when2call — the one item "what remains" (above) still listed as open going into this round.
+
+- researched tau2-bench + agentuq + when2call before committing to scope. tau2-bench/agentuq turned out to have real blockers, not just extra work: tau2-bench needs python <3.14 (project floor is >=3.11 with no ceiling; this repo's `.venv` is 3.14 — would need an isolated `uv venv --python 3.12` just for it), agentuq is a fixed cli pipeline (`tau2 run` / `extract-uq-from-trajs` / `evaluate-uq`) wrapping *its own* agent loop that doesn't compose with uqguard's langgraph `Guard` middleware, and the roadmap's mean-token-logprob baseline needs real work first — `CandidateAction.logprob` exists in the schema but `capture.py` never populates it today. scoped as a follow-up rather than force it in half-verified against an external repo's api.
+- when2call was tractable now: single-turn, 3-way ground truth (`tool_call` / `request_for_info` / `cannot_answer`), no external harness needed beyond `datasets`.
+- `eval/run_when2call.py`: samples n rows from `nvidia/When2Call` (test config, mcq split, 3652 rows), converts its bfcl-style tool schemas (`"type": "dict"`, recursively) to `bind_tools()`-compatible specs, k-samples the model directly (no agent graph needed for a single turn — reuses the same tool_calls-vs-text parsing branch as `uqguard.capture.to_candidate`), scores the binary decision uqguard's architecture actually makes (call a tool or not) via `arg_agreement` fed through the exact fit/cal/test split + conformal calibration `eval/calibrate.py` already has. deliberately does not attempt to disambiguate `request_for_info` vs `cannot_answer` within the no-call bucket (a separate text-classification problem nothing in this codebase attempts) — reported only as an unscored breakdown, not folded into the accuracy number.
+- `eval/calibrate.py`: `plots()` takes `out_dir=` so `run_when2call.py` reuses it instead of duplicating plotting code.
+- results (n=60, k=3, `ollama_cloud:gpt-oss:120b`, seed 7, `eval/out/when2call/results.json`): binary decision accuracy 44/60 = **0.733**. auroc of arg_agreement = 0.555, near chance — honest negative, much weaker than the multi-step booking task's 0.692-0.865. plausible reason: when2call's ambiguity is mostly *whether* to call at all, not *which args* to use, so a model can unanimously agree to call the wrong tool or unanimously decline correctly either way, scoring `arg_agreement=1.0` regardless of correctness. conformal threshold at alpha=0.1 accepted 0/20 test rows — too little calibration data for this signal at this task to clear the bound confidently.
+- validation: 10 new tests (147 total, all offline), ruff check + format clean.
+- deleted the stray `session-ses_0c23.md` transcript file from the repo root (untracked, not part of the codebase, no longer needed once its contents were cross-checked into round 3b above).
+- found in passing (not when2call-specific): `policy._score`'s `getattr(entry, "name", entry.__name__)` evaluates the default arg eagerly, so any scorer *instance* (e.g. `OptionsSetScorer`, which has `.name` but no `__name__`) crashes the moment it's routed through `ThresholdPolicy`/`RoutedPolicy` — every `--judge` example does exactly that. `eval/calibrate.py` never hit it because it calls the judge directly, bypassing policy. Fixed with a short-circuit `or`; regression test added.
+- committed (`e2ff7ec` When2Call track + one more for the getattr fix), **not pushed** — pending user go-ahead.

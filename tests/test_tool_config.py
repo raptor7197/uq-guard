@@ -46,6 +46,28 @@ def test_routed_policy_per_tool_scorers():
     assert "options_set" not in search.signals  # and not for search
 
 
+class _InstanceScorer:
+    """A scorer instance (e.g. OptionsSetScorer) has .name but, unlike a
+    plain function, no __name__ -- regression fixture for the crash below."""
+
+    name = "custom_instance"
+
+    def __call__(self, step, history=()):
+        return 0.9
+
+
+def test_score_accepts_scorer_instance_lacking_dunder_name():
+    # getattr(entry, "name", entry.__name__) evaluates entry.__name__ eagerly
+    # as the default, regardless of whether "name" is found -- crashing on
+    # any scorer instance even though .name exists. Every --judge caller
+    # (demo_agent.py, integrate_existing_agent.py, eval/calibrate.py) passes
+    # OptionsSetScorer this way.
+    p = ThresholdPolicy(threshold=0.5, scorers=(_InstanceScorer(),))
+    step = _step()
+    assert p.decide(step) == "PROCEED"
+    assert step.signals["custom_instance"] == 0.9
+
+
 def test_routed_policy_per_tool_threshold_and_routes():
     p = RoutedPolicy(
         threshold=0.8,
